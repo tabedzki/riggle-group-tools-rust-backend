@@ -11,7 +11,7 @@ use std::fs;
 use std::fs::File;
 use std::io::stdin;
 use regex::Regex;
-use std::io::{BufReader,BufRead};
+use std::io::{BufRead, BufReader};
 // use std::slice;
 
 #[repr(C)]
@@ -161,10 +161,24 @@ fn sum_as_string(a: i64, b: i64) -> String {
 #[pyfunction]
 fn read_file2(file_path: &str) -> PyResult<()> {
     let re = Regex::new("TIMESTEP").unwrap();
-    let resultt = re.find_iter(file_path).count();
-    println!("Found TIMESTEP {} times", resultt);
+    let mut matched_lines = 0;
+    let file = BufReader::new(File::open(&file_path).unwrap());
+    for line in file.lines() {
+        let my_line = line.unwrap();
+        if my_line.contains("TIMESTEP") {
+            matched_lines += 1;
+        }
+    }
+    println!("Found TIMESTEP {} times", matched_lines);
+
+    // let resultt = re.find_iter(file_path).count();
+    // println!("Found TIMESTEP {} times", resultt);
     let f = File::open(file_path)?;
-    let mut rdr = csv::ReaderBuilder::new().has_headers(false).flexible(true).delimiter(b' ').from_reader(f);
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(b' ')
+        .from_reader(f);
     let mut records = rdr.records();
     for _ in 0..3 {
         if let Some(Ok(record)) = records.next() {
