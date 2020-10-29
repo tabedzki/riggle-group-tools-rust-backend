@@ -1,64 +1,331 @@
-extern crate cpython;
-
-// use cpython::{PyResult, Python, py_module_initializer, py_fn};
-// use cpython;
-// use anyhow;
-use csv::Reader; // 1.1.3
+use itertools;
 use pyo3::prelude::*;
-use pyo3::wrap_pyfunction;
+use rayon::prelude::*;
 use serde; // 1.0.117
-use std::fs;
 use std::fs::File;
-use std::io::stdin;
-use regex::Regex;
-use std::io::{BufRead, BufReader};
-// use std::slice;
+use std::io;
+use std::io::{BufRead, BufReader, ErrorKind};
 
 #[repr(C)]
-#[derive(serde::Deserialize)]
-struct Particle {
+#[pyclass]
+#[derive(serde::Deserialize, Debug, Clone)]
+pub(crate) struct Particle {
+    #[pyo3(get)]
     item: u32,
+    #[pyo3(get)]
+    part_type: u32,
+    #[pyo3(get)]
     mol: u32,
+    #[pyo3(get)]
     x: f32,
+    #[pyo3(get)]
     y: f32,
+    #[pyo3(get)]
     z: f32,
-    v_x: Option<f32>,
-    v_y: Option<f32>,
-    v_z: Option<f32>,
-}
-
-// fn read_file<T>(file_path: &str) -> PyResult<T> {
-//     let mut count = 0;
-//     let file = File::open(file_path)?;
-//     let mut rdr = csv::Reader::from_reader(file);
-//     let mut records = rdr.records();
-//     for _ in 0..3 {
-//         let record = records.next()?;
-//         println!("{:?}", record);
-//     }
-//     Ok(());
-// }
-
-fn main() {
-    let stdin = stdin();
-    let mut reader = Reader::from_reader(stdin);
-    let records = reader.deserialize::<Particle>().collect::<Vec<_>>();
+    #[pyo3(get)]
+    mass: Option<f32>,
+    #[pyo3(get)]
+    vx: Option<f32>,
+    #[pyo3(get)]
+    vy: Option<f32>,
+    #[pyo3(get)]
+    vz: Option<f32>,
+    #[pyo3(get)]
+    xs: Option<f32>,
+    #[pyo3(get)]
+    ys: Option<f32>,
+    #[pyo3(get)]
+    zs: Option<f32>,
+    #[pyo3(get)]
+    xsu: Option<f32>,
+    #[pyo3(get)]
+    ysu: Option<f32>,
+    #[pyo3(get)]
+    zsu: Option<f32>,
+    #[pyo3(get)]
+    fx: Option<f32>,
+    #[pyo3(get)]
+    fy: Option<f32>,
+    #[pyo3(get)]
+    fz: Option<f32>,
+    #[pyo3(get)]
+    mux: Option<f32>,
+    #[pyo3(get)]
+    muy: Option<f32>,
+    #[pyo3(get)]
+    muz: Option<f32>,
+    #[pyo3(get)]
+    omegax: Option<f32>,
+    #[pyo3(get)]
+    omegay: Option<f32>,
+    #[pyo3(get)]
+    omegaz: Option<f32>,
+    #[pyo3(get)]
+    angmomx: Option<f32>,
+    #[pyo3(get)]
+    angmomy: Option<f32>,
+    #[pyo3(get)]
+    angmomz: Option<f32>,
 }
 
 #[repr(C)]
-struct SimHolder {
-    simulations: Vec<Simulation>,
+#[pyclass]
+#[derive(Debug, Clone)]
+pub(crate) struct SimHolder {
+    #[pyo3(get, set)]
+    pub simulations: Vec<Simulation>,
 }
 
 #[repr(C)]
-struct Simulation {
-    frames: Vec<SimulationFrame>,
+#[pyclass]
+#[derive(Debug, Clone)]
+pub(crate) struct Simulation {
+    #[pyo3(get)]
+    pub frames: Vec<SimulationFrame>,
 }
 
 #[repr(C)]
-struct SimulationFrame {
-    time: u32,
-    pos: Vec<Vec<u32>>,
+#[pyclass]
+#[derive(Debug, Clone)]
+pub(crate) struct SimulationFrame {
+    #[pyo3(get)]
+    time: u64,
+    #[pyo3(get)]
+    atoms: Vec<Particle>,
+    #[pyo3(get)]
+    box_size: Vec<(f32, f32)>,
+}
+
+#[pymethods]
+impl SimHolder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            simulations: Vec::with_capacity(0),
+        }
+    }
+
+    pub fn add_simulations(&mut self, sims: Vec<Simulation>) -> PyResult<()> {
+        self.simulations.extend(sims);
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl Simulation {
+    #[new]
+    fn new() -> Self {
+        Self {
+            frames: Vec::with_capacity(0),
+        }
+    }
+
+    pub fn add_frames(&mut self, frames: Vec<SimulationFrame>) -> PyResult<()> {
+        self.frames.extend(frames);
+        Ok(())
+    }
+
+    pub fn calc_msd(&mut self, idx_begin: usize, idx_end: usize) -> PyResult<Vec<Vec<f32>>> {
+        Ok(calculate_msd(self, idx_begin, idx_end)?)
+    }
+}
+
+#[pymethods]
+impl SimulationFrame {
+    #[new]
+    fn new() -> Self {
+        Self {
+            time: 0,
+            atoms: Vec::with_capacity(0),
+            box_size: Vec::with_capacity(3),
+        }
+    }
+
+    pub fn add_atoms(&mut self, atoms: Vec<Particle>) -> PyResult<()> {
+        self.atoms.extend(atoms);
+        Ok(())
+    }
+}
+
+#[pymodule]
+fn rust2py_alt(_py: Python, m: &PyModule) -> PyResult<()> {
+    #[pyfn(m, "read_file")]
+    fn read_file_py(_py: Python, file_path: &str) -> PyResult<SimHolder> {
+        let out = read_file(file_path)?;
+        Ok(out)
+    }
+
+    m.add_class::<Particle>()?;
+    m.add_class::<Simulation>()?;
+    m.add_class::<SimHolder>()?;
+    m.add_class::<SimulationFrame>()?;
+
+    Ok(())
+}
+
+fn calculate_msd(
+    sim: &mut Simulation,
+    start_idx: usize,
+    idx_end: usize,
+) -> Result<Vec<Vec<f32>>, io::Error> {
+
+    Ok(sim.frames[start_idx..idx_end]
+        .par_iter()
+        .map(|frame| {
+            frame
+                .atoms
+                .iter()
+                .map(|p| {
+                    (p.x - frame.atoms[start_idx].x).powi(2)
+                        + (p.y - frame.atoms[start_idx].y).powi(2)
+                        + (p.z - frame.atoms[start_idx].z).powi(2)
+                })
+                .collect::<Vec<f32>>()
+        })
+        .collect::<Vec<Vec<f32>>>())
+}
+
+fn read_file(file_path: &str) -> Result<SimHolder, io::Error> {
+    let file = BufReader::new(File::open(&file_path)?);
+
+    let matched_lines = itertools::process_results(file.lines(), |i| {
+        i.filter(|l| l.contains("TIMESTEP")).count()
+    })?;
+
+    let mut sim_holder = SimHolder {
+        simulations: Vec::with_capacity(1),
+    };
+    sim_holder.simulations.push(Simulation {
+        frames: Vec::with_capacity(matched_lines),
+    });
+    let f = File::open(file_path)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(b' ')
+        .from_reader(f);
+
+    let records = rdr.records();
+    let mut status: Option<String> = None;
+    let mut cur_frame: Option<&mut SimulationFrame> = None;
+    let mut lines2read = 0;
+
+    for record in records {
+        let line = record.unwrap();
+        let rr: Option<Particle> = line.deserialize(None).unwrap_or_else(|_| None);
+
+        if let Some(particle) = rr {
+            cur_frame
+                .as_mut()
+                .ok_or_else(|| {
+                    return io::Error::new(
+                        ErrorKind::Other, "Invalid Line Found: No frame initialized. Most likely improper file format.");
+                })?
+                .atoms
+                .push(particle);
+            continue;
+        }
+
+        if lines2read > 0 {
+            match status.as_deref() {
+                Some(x) if x.contains("TIMESTEP") => {
+                    sim_holder
+                        .simulations
+                        .last_mut()
+                        .unwrap()
+                        .frames
+                        .push(SimulationFrame {
+                            time: line.as_slice().parse::<u64>().unwrap(),
+                            atoms: Vec::with_capacity(0),
+                            box_size: Vec::with_capacity(3),
+                        });
+                    cur_frame = Some(
+                        sim_holder
+                            .simulations
+                            .last_mut()
+                            .expect("No simulation found.")
+                            .frames
+                            .last_mut()
+                            .expect("No simulation frame found."),
+                    );
+                    status = None;
+                    lines2read = 0;
+                }
+                Some(x) if x.contains("BOX") => {
+                    lines2read -= 1;
+                    cur_frame
+                        .as_mut()
+                        .unwrap()
+                        .box_size
+                        .push(line.deserialize(None).expect("Expected Box Dimensions"));
+                    if lines2read == 0 {
+                        status = None;
+                    }
+                }
+                Some(x) if x.contains("NUMBER") => {
+                    lines2read = 0;
+                    let capacity = line
+                        .as_slice()
+                        .parse::<usize>()
+                        .expect("Expected number of ATOMS");
+                    cur_frame.as_mut().unwrap().atoms.reserve_exact(capacity);
+                    status = None;
+                }
+                Some(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        // PyValueError::new_err(
+                        "Not one of the possible options.",
+                    ));
+                }
+                None => (),
+            }
+        } else {
+            match line {
+                x if x.as_slice().contains("TIMESTEP") => {
+                    status = Some(String::from("TIMESTEP"));
+                    lines2read = 1;
+                }
+                x if x.as_slice().contains("BOX") => {
+                    if cur_frame.is_none() {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            "Simulation frame is not initialized.",
+                        ));
+                    }
+                    status = Some(String::from("BOX"));
+                    lines2read = x.len() - 3;
+                }
+                x if x.as_slice().contains("NUMBER") => {
+                    if cur_frame.is_none() {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            "Simulation frame is not initialized.",
+                        ));
+                    }
+                    status = Some(String::from("NUMBER"));
+                    lines2read = 1;
+                }
+                x if x.as_slice().contains("ITEM:ATOMS") => {
+                    if cur_frame.is_none() {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            "Simulation frame is not initialized.",
+                        ));
+                    }
+                    status = Some(String::from("ATOMS"));
+                }
+                x => {
+                    return Err(io::Error::new(
+                        ErrorKind::Other, // PyValueError::new_err(
+                        format!("Invalid Line Found:\n{}", x.as_slice()).as_str(),
+                    ));
+                }
+            };
+        }
+    }
+
+    Ok(sim_holder)
 }
 
 #[cfg(test)]
@@ -68,127 +335,3 @@ mod tests {
         assert_eq!(2 + 2, 4);
     }
 }
-
-cpython::py_module_initializer!(rust2py, |py, m| {
-    m.add(py, "__doc__", "This module is inplemented in Rust.")?;
-    m.add(py, "get_result", cpython::py_fn!(py, get_result(val: &str)))?;
-    m.add(py, "read_sim", cpython::py_fn!(py, read_sim(val: &str)))?;
-    m.add(py, "echo", cpython::py_fn!(py, echo(val: Vec<f32>)))?;
-    m.add(py, "avg", cpython::py_fn!(py, avg(val: Vec<f32>)))?;
-    m.add(py, "test2", cpython::py_fn!(py, test2(val: Vec<Vec<f32>>)))?;
-    m.add(
-        py,
-        "row_avg",
-        cpython::py_fn!(py, row_avg(val: Vec<Vec<f32>>)),
-    )?;
-    Ok(())
-});
-
-fn get_result(_py: cpython::Python, val: &str) -> cpython::PyResult<String> {
-    let mut x: u32 = 1;
-    return Ok("Rust says: ".to_owned() + val);
-}
-
-fn read_sim(_py: cpython::Python, filename: &str) -> cpython::PyResult<String> {
-    let contents = fs::read_to_string(filename).expect("Something with wrong reading the file");
-    let mut f = File::open(filename).expect("File not found.");
-    return Ok("Read in ".to_owned() + filename);
-}
-
-fn echo(_py: cpython::Python, nums: Vec<f32>) -> cpython::PyResult<Vec<f32>> {
-    // let contents = fs::read_to_string(filename).expect("Something with wrong reading the file");
-    //  let mut f = File::open(filename).expect("File not found.");
-    return Ok(nums);
-}
-
-fn avg(_py: cpython::Python, nums: Vec<f32>) -> cpython::PyResult<f32> {
-    // let contents = fs::read_to_string(filename).expect("Something with wrong reading the file");
-    //  let mut f = File::open(filename).expect("File not found.");
-    let mut total: f32 = nums.iter().sum();
-    total /= nums.len() as f32;
-    return Ok(total);
-}
-
-// fn test2(_py: Python, nums:  Vec<Vec<f32>>) -> PyResult<Vec<Vec<f32>>>{
-fn test2(_py: cpython::Python, nums: Vec<Vec<f32>>) -> cpython::PyResult<f32> {
-    let mut total: f32 = nums.iter().flatten().sum();
-    // total /= nums.len() as f64;
-    return Ok(total);
-}
-
-fn row_avg(_py: cpython::Python, nums: Vec<Vec<f32>>) -> cpython::PyResult<Vec<f32>> {
-    // let mut total: f32 = nums.iter().flatten().sum();
-    let mut totals: Vec<f32> = Vec::with_capacity(nums.len());
-    for row in nums {
-        let mut total: f32 = row.iter().sum();
-        total /= row.len() as f32;
-        totals.push(total / row.len() as f32);
-    }
-    // total /= nums.len() as f64;
-    return Ok(totals);
-}
-
-#[pymodule]
-fn rust2py_alt(py: Python, m: &PyModule) -> PyResult<()> {
-    // let mut total: f32 = nums.iter().flatten().sum();
-    // let mut totals: Vec<f32> = Vec::with_capacity(nums.len());
-    // for row in nums{
-    //     let total: f32 = row.iter().sum();
-    //     total /= row.len() as f32;
-    #[pyfn(m, "sum_as_string")]
-    fn sum_as_string_py(_py: Python, a: i64, b: i64) -> PyResult<String> {
-        let out = sum_as_string(a, b);
-        Ok(out)
-    }
-
-    m.add_function(wrap_pyfunction!(sum_as_string, m)?).unwrap();
-    m.add_function(wrap_pyfunction!(read_file2, m)?).unwrap();
-    //     totals.push(total / row.len() as f32);
-    // }
-    // total /= nums.len() as f64;
-    // totals
-    Ok(())
-}
-
-// logic implemented as a normal Rust function
-#[pyfunction]
-fn sum_as_string(a: i64, b: i64) -> String {
-    format!("{}", a + b)
-}
-
-// fn read_frames(_py, nums) -> PyResult
-
-#[pyfunction]
-fn read_file2(file_path: &str) -> PyResult<()> {
-    let re = Regex::new("TIMESTEP").unwrap();
-    let mut matched_lines = 0;
-    let file = BufReader::new(File::open(&file_path).unwrap());
-    for line in file.lines() {
-        let my_line = line.unwrap();
-        if my_line.contains("TIMESTEP") {
-            matched_lines += 1;
-        }
-    }
-    println!("Found TIMESTEP {} times", matched_lines);
-
-    // let resultt = re.find_iter(file_path).count();
-    // println!("Found TIMESTEP {} times", resultt);
-    let f = File::open(file_path)?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(b' ')
-        .from_reader(f);
-    let mut records = rdr.records();
-    for _ in 0..3 {
-        if let Some(Ok(record)) = records.next() {
-            println!("{:?}", record);
-        }
-    }
-    Ok(())
-}
-
-// let f = match f {
-//     Ok(file) => file,
-//     Err(e) => return Err(e)
-// };
