@@ -175,10 +175,11 @@ fn calculate_msd(
             frame
                 .atoms
                 .iter()
-                .map(|p| {
-                    (p.x - frame.atoms[start_idx].x).powi(2)
-                        + (p.y - frame.atoms[start_idx].y).powi(2)
-                        + (p.z - frame.atoms[start_idx].z).powi(2)
+                .zip(sim.frames[start_idx].atoms.iter())
+                .map(|(p1, p0)| {
+                    (p1.x - p0.x).powi(2)
+                        + (p1.y - p0.y).powi(2)
+                        + (p1.z - p0.z).powi(2)
                 })
                 .collect::<Vec<f32>>()
         })
@@ -324,6 +325,11 @@ fn read_file(file_path: &str) -> Result<SimHolder, io::Error> {
             };
         }
     }
+    sim_holder.simulations.iter_mut().for_each(|x|{
+        x.frames.iter_mut().for_each(|y|{
+                y.atoms.sort_by_key(|p| p.item)
+        })
+    });
 
     Ok(sim_holder)
 }
